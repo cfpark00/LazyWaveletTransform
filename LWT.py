@@ -1,3 +1,5 @@
+#Core Francisco Park implemented a wavelet package inspired from https://arxiv.org/abs/1203.1513
+
 import torch
 import torch.fft
 import numpy as np
@@ -47,6 +49,9 @@ def make_healpix_wavelets(N,NR=8,nside=2,dtype=torch.float64,rough_mem_limit=400
     wavelets=torch.cat([dcw[None,...],wavelets],dim=0).to(dtype=dtype)
     return wavelets
 
+def make_icosahedron_wavelets(N,NR=8,nside=1):
+    assert False, "Not doing this"
+    #from https://en.wikipedia.org/wiki/Regular_icosahedron#/media/File:Icosahedron-golden-rectangles.svg
 
 def make_wavelets(N,NR=8,NT=8,dtype=torch.float64):
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
