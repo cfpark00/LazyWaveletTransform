@@ -134,6 +134,7 @@ def LWT_R(image,wavelets,m=2,rsnl="abs",verbose=False):
 
 
 def LWT2D_F(image,wavelets,m=2):
+    assert False, "Not doing this"
     assert m<=2, "m max currently 2"
     wavelets=wavelets/torch.sum(wavelets,axis=(1,2))[:,None,None]
     print("Currently just filter response")
