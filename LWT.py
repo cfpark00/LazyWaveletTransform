@@ -118,7 +118,7 @@ def make_icosahedron_wavelets(N,NR=8,nside=1):
     assert False, "Not doing this"
     #from https://en.wikipedia.org/wiki/Regular_icosahedron#/media/File:Icosahedron-golden-rectangles.svg
 
-def make_wavelets(N,NR=8,NT=8,dtype=torch.float64,add_z=False,NZ=9,return_bases=False):
+def make_wavelets(N,NR=6,NT=8,dtype=torch.float64,add_z=False,NZ=6,return_bases=False):
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
     kx,ky=torch.meshgrid(k_arr,k_arr)
     k_abs=torch.sqrt(kx**2+ky**2)
@@ -126,7 +126,7 @@ def make_wavelets(N,NR=8,NT=8,dtype=torch.float64,add_z=False,NZ=9,return_bases=
     rs=torch.logspace(1,np.log2(N//2),NR+1,base=2)
     rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
     r_dists=(rs[1:]-rs[:-1])
-    thetas=torch.arange(-1,NT+1).to(dtype=dtype)/NT*np.pi
+    thetas=torch.arange(-1,NT+1).to(dtype=dtype)/NT*(2*np.pi if add_z else np.pi)
     t_dists=(thetas[1:]-thetas[:-1])
     radials=[]
     for r,prev_dist,post_dist in zip(rs[1:-1],r_dists[:-1],r_dists[1:]):
@@ -153,13 +153,12 @@ def make_wavelets(N,NR=8,NT=8,dtype=torch.float64,add_z=False,NZ=9,return_bases=
     dcw*=(1-torch.sum(wavelets,dim=0))
     wavelets=torch.cat([dcw[None,:,:],wavelets],dim=0).to(dtype=dtype)
     if add_z:
-        assert NZ%2==1, "NZ should be odd"
         _,_,kz=torch.meshgrid(k_arr,k_arr,k_arr)
-        rs=torch.logspace(1,np.log2(N//2),NZ//2+1,base=2)
-        rs_twosided=torch.cat([-torch.flip(rs,dims=(0,)),torch.zeros(1),rs],dim=0)
-        r_dists_twosided=(rs_twosided[1:]-rs_twosided[:-1])
+        rs=torch.logspace(1,np.log2(N//2),NZ+1,base=2)
+        rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
+        r_dists=(rs[1:]-rs[:-1])
         zs=[]
-        for r,prev_dist,post_dist in zip(rs_twosided[1:-1],r_dists_twosided[:-1],r_dists_twosided[1:]):
+        for r,prev_dist,post_dist in zip(rs[1:-1],r_dists[:-1],r_dists[1:]):
             diff=kz-r
             t=torch.abs(diff)
             t_prev=t/prev_dist
@@ -168,6 +167,7 @@ def make_wavelets(N,NR=8,NT=8,dtype=torch.float64,add_z=False,NZ=9,return_bases=
             post=(2*t_post**3-3*t_post**2+1)*(t<post_dist)*(diff>0)
             zs.append(post+prev)
         zs=torch.stack(zs)
+        print("zs shape",zs.shape)
         wavelets=(zs[None,:,:,:,:]*wavelets[:,None,:,:,None]).reshape(-1,N,N,N)
         if return_bases:
             return wavelets,{"r":radials,"theta":angulars,"z":zs}
@@ -262,19 +262,37 @@ def LWT_R(image,wavelets,m=2,rsnl="abs",verbose=False,pknorm=False):
         coeffs.extend(coeffs2)
     return torch.stack(coeffs)
 
-def LWT_R_abs2_fast(image,wavelets,m=2,verbose=False,pknorm=False):
-    dim=len(image.size())
-    assert dim==2 or dim==3, "image should be 2D or 3D"
-    N=image.size(0)
-    assert m in [0,1,2], "m should be 0,1,2"
-    assert all([s==N for s in image.size()]),"image not "+str(dim)+"-cube"
-    assert len(wavelets[0].size())==dim,"Wavelets not right."
+def wavelet_to_mms_vals(wavelets):
+    dim=len(wavelets.shape)-1
+    assert dim==2 or dim==3,"2 or 3 dim"
+    wavelets_shifted=torch.fft.fftshift(wavelets)
+    mms=[]
+    vals=[]
+    logicals=wavelets>1e-13
+    for wavelet,logical in zip(wavelets_shifted,logicals):
+        ms=[]
+        Ms=[]
+        for i in range(dim):
+            inds=np.nonzero(logical.sum(i))[0]
+            ms.append(np.min(inds))
+            Ms.append(np.max(inds))
+        mms.append(np.array([ms,Ms]))
+        if dim==3:
+            vals.append(wavelet[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]
+        elif dim==2:
+            vals.append(wavelet[ms[0]:Ms[0],ms[1]:Ms[1]]
 
+def LWT_R_abs2_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False,pknorm=False):
+    dim=len(image.size())
+    N=image.size(0)
 
     if pknorm:
         ks,Pks,pknd=Pk(image,keepdim=True)
 
-    Nw=len(wavelets)
+    Nw=len(wavelet_mms)
+    assert Nw==len(wavelet_vals)
+    for wavelet in wavelets:
+        waveletsmms
     coeffs=[]
     std,mean=torch.std_mean(image)
     coeffs.append(mean)
@@ -283,7 +301,7 @@ def LWT_R_abs2_fast(image,wavelets,m=2,verbose=False,pknorm=False):
     image=(image-m)/(std+1e-8)
 
     
-    image_k=torch.fft.fftn(image)
+    image_k=torch.fft.fftshift(torch.fft.fftn(image))
     if pknorm:
         image_k=image_k/(pknd+1e-9)
         coeffs.extend(Pks)
