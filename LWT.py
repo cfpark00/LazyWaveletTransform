@@ -175,7 +175,8 @@ def LWT_R_abs2_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
     if m==2:
         buffer=torch.zeros_like(image_k)
         coeffs2=[]
-
+    
+    wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
         st=time.time()
         if verbose:
@@ -208,18 +209,18 @@ def LWT_R_abs2_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
         times[2].append(time.time()-st)
         st=time.time()
         im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r))
+        im1_k_abs2=im1_k.real**2+im1_k.imag**2
         times[3].append(time.time()-st)
         st=time.time()
+        
         for w2 in range(Nw):
             ms=wavelet_mms[w2][0]
             Ms=wavelet_mms[w2][1]
-        
+            
             if dim==3:
-                sub=im1_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2]
-                coeffs2.append(torch.sum(sub.real**2+sub.imag**2))
+                coeffs2.append(torch.sum(im1_k_abs2[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2]))
             elif dim==2:
-                sub=im1_k[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w2]
-                coeffs2.append(torch.sum(sub.real**2+sub.imag**2))
+                coeffs2.append(torch.sum(im1_k_abs2[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2]))
         times[4].append(time.time()-st)
 
 
@@ -253,7 +254,8 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False):
     if m==2:
         buffer=torch.zeros_like(image_k)
         coeffs2=[]
-
+        
+    wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
         st=time.time()
         if verbose:
@@ -278,7 +280,7 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False):
             coeffs.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
             if m==1:
                 continue
-            buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=sub
+            buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=sub*norm
         times[1].append(time.time()-st)
         st=time.time()
         im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
@@ -286,6 +288,7 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False):
         times[2].append(time.time()-st)
         st=time.time()
         im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r,dim=imdims),dim=imdims)
+        im1_k_abs2=im1_k.real**2+im1_k.imag**2
         times[3].append(time.time()-st)
         st=time.time()
         for w2 in range(Nw):
@@ -293,11 +296,9 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False):
             Ms=wavelet_mms[w2][1]
         
             if dim==3:
-                sub=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2][None,:,:,:]
-                coeffs2.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
+                coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2][None,:,:,:],dim=imdims))
             elif dim==2:
-                sub=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w2][None,:,:]
-                coeffs2.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
+                coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2][None,:,:],dim=imdims))
         times[4].append(time.time()-st)
 
 
