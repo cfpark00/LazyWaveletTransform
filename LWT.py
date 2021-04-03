@@ -9,7 +9,10 @@ import scipy.ndimage as sim
 import os
 import glob
 
-def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,return_bases=False,verbose=False):
+import time
+
+
+def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,return_bases=False,verbose=False,sqrt=True):
     if add_z:
         assert twopi
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
@@ -61,7 +64,7 @@ def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,re
         dcz=(torch.abs(k_arr)<=rs[1]).to(dtype=dtype)
         dcz*=(1-torch.sum(zs,dim=0))
         zs=torch.cat([dcz[None,:],zs],dim=0)
-    
+
     if return_bases:
         if add_z:
             return dcw,radials,angulars,zs
@@ -76,7 +79,7 @@ def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,re
         buffer=torch.ones(tuple(N for _ in range(3)),dtype=dtype)
     else:
         tw=(NR*NT+1)
-    
+
     #dcw first
     if add_z:
         for z in zs:
@@ -116,8 +119,9 @@ def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,re
                 mms.append(mm)
                 vals.append(val)
                 c+=1
+    if sqrt:
+        return mms,[torch.sqrt(val) for val in vals]
     return mms,vals
-
 
 def wavelet_to_mm_val(wavelet):
     dim=len(wavelet.shape)
@@ -137,6 +141,16 @@ def wavelet_to_mm_val(wavelet):
     elif dim==2:
         return np.array([ms,Ms]),wavelet_shifted[ms[0]:Ms[0],ms[1]:Ms[1]].clone()
 
+def save_wavelets(wavelet_mms,wavelet_vals,name,wpath=None):
+    if wpath is None:
+        wpath=os.path.join(os.path.split(__file__)[0],"wavelets",name)
+    os.mkdir(wpath)
+    Nf=len(wavelet_mms)
+    for i in range(Nf):
+        np.save(os.path.join(wpath,"mm_"+str(i)+".npy"),wavelet_mms[i])
+        np.save(os.path.join(wpath,"val_"+str(i)+".npy"),wavelet_vals[i].cpu().detach().numpy())
+
+
 def load_wavelets(name="wavelets1",wpath=None,dtype=torch.float64,device="cpu"):
     if wpath is None:
         wpath=os.path.join(os.path.split(__file__)[0],"wavelets",name)
@@ -148,100 +162,17 @@ def load_wavelets(name="wavelets1",wpath=None,dtype=torch.float64,device="cpu"):
         wavelet_mms.append(np.load(os.path.join(wpath,"mm_"+str(i)+".npy")))
         wavelet_vals.append(torch.tensor(np.load(os.path.join(wpath,"val_"+str(i)+".npy")),dtype=dtype,device=device))
     return wavelet_mms,wavelet_vals
-    
-    
-import time
-def LWT_R_abs2_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
-    times=[[],[],[],[],[]]
-    
-    assert m==0 or m==1 or m==2
-    dim=len(image.size())
-    N=image.size(0)
-    Nw=len(wavelet_mms)
-    assert Nw==len(wavelet_vals)
 
-    coeffs=[]
-    std,mean=torch.std_mean(image,unbiased=False)
-    coeffs.append(mean)
-    coeffs.append(std)
-    if m==0:
-        return torch.stack(coeffs)
-    
-    if dim==3:
-        image=(image-mean)/(std+1e-8)
-    else:
-        image=(image-mean)/(std+1e-8)
-    image_k=torch.fft.fftn(image)
-    if MAS_corrector is not None:
-        image_k*=MAS_corrector
-    image_k=torch.fft.fftshift(image_k)
-    
-    if m==2:
-        buffer=torch.zeros_like(image_k)
-        coeffs2=[]
-    
-    wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
-    for w1 in range(Nw):
-        st=time.time()
-        if verbose:
-            print("Wavelet:",str(w1+1),"/",str(Nw))
-        if m==2:
-            buffer.zero_()
-
-        ms=wavelet_mms[w1][0]
-        Ms=wavelet_mms[w1][1]
-        
-        times[0].append(time.time()-st)
-        st=time.time()
-        
-        if dim==3:
-            sub=image_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1]
-            coeffs.append(torch.sum(sub.real**2+sub.imag**2))
-            if m==1:
-                continue
-            buffer[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=sub
-        elif dim==2:
-            sub=image_k[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w1]
-            coeffs.append(torch.sum(sub.real**2+sub.imag**2))
-            if m==1:
-                continue
-            buffer[ms[0]:Ms[0],ms[1]:Ms[1]]=sub
-        times[1].append(time.time()-st)
-        st=time.time()
-        im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer))
-        im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
-        times[2].append(time.time()-st)
-        st=time.time()
-        im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r))
-        im1_k_abs2=im1_k.real**2+im1_k.imag**2
-        times[3].append(time.time()-st)
-        st=time.time()
-        
-        for w2 in range(Nw):
-            ms=wavelet_mms[w2][0]
-            Ms=wavelet_mms[w2][1]
-            
-            if dim==3:
-                coeffs2.append(torch.sum(im1_k_abs2[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2]))
-            elif dim==2:
-                coeffs2.append(torch.sum(im1_k_abs2[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2]))
-        times[4].append(time.time()-st)
-
-
-    if m==2:
-        coeffs.extend(coeffs2)
-    return torch.stack(coeffs),times
 
 def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
     times=[[],[],[],[],[]]
-    
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
     N=images.size(1)
     Nw=len(wavelet_mms)
     assert Nw==len(wavelet_vals)
-    
+
     imdims=(1,2,3) if dim==3 else (1,2)
 
     coeffs=[]
@@ -262,7 +193,7 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
     if m==2:
         buffer=torch.zeros_like(image_k)
         coeffs2=[]
-        
+
     wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
         st=time.time()
@@ -273,10 +204,10 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
 
         ms=wavelet_mms[w1][0]
         Ms=wavelet_mms[w1][1]
-        
+
         times[0].append(time.time()-st)
         st=time.time()
-        
+
         if dim==3:
             sub=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1][None,:,:,:]
             coeffs.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
@@ -302,19 +233,94 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
         for w2 in range(Nw):
             ms=wavelet_mms[w2][0]
             Ms=wavelet_mms[w2][1]
-        
+
             if dim==3:
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2][None,:,:,:],dim=imdims))
             elif dim==2:
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2][None,:,:],dim=imdims))
         times[4].append(time.time()-st)
 
-
     if m==2:
         coeffs.extend(coeffs2)
     return torch.stack(coeffs).T,times
 
+def LWT_R_abs_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
+    times=[[],[],[],[],[]]
+    assert m==0 or m==1 or m==2
+    dim=len(images.size())-1
+    assert dim==2 or dim==3
+    N=images.size(1)
+    Nw=len(wavelet_mms)
+    assert Nw==len(wavelet_vals)
 
+    imdims=(1,2,3) if dim==3 else (1,2)
+
+    coeffs=[]
+    std,mean=torch.std_mean(images,dim=imdims,unbiased=False)
+    coeffs.append(mean)
+    coeffs.append(std)
+    if m==0:
+        return torch.stack(coeffs).T
+    if dim==3:
+        images=(images-mean[:,None,None,None])/(std[:,None,None,None]+1e-8)
+    else:
+        images=(images-mean[:,None,None])/(std[:,None,None]+1e-8)
+    image_k=torch.fft.fftn(images,dim=imdims)
+    if MAS_corrector is not None:
+        image_k*=MAS_corrector[None]
+    image_k=torch.fft.fftshift(image_k,dim=imdims)
+
+    if m==2:
+        buffer=torch.zeros_like(image_k)
+        coeffs2=[]
+
+    wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
+    for w1 in range(Nw):
+        st=time.time()
+        if verbose:
+            print("Wavelet:",str(w1+1),"/",str(Nw))
+        if m==2:
+            buffer.zero_()
+
+        ms=wavelet_mms[w1][0]
+        Ms=wavelet_mms[w1][1]
+
+        times[0].append(time.time()-st)
+        st=time.time()
+
+        if dim==3:
+            buffer[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1][None,:,:,:]
+        elif dim==2:
+            buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w1][None,:,:]
+        times[1].append(time.time()-st)
+        st=time.time()
+        im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
+        im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
+        coeffs.append(torch.sum(im1_r,dim=imdims))
+        if m==1:
+            continue
+        times[2].append(time.time()-st)
+        st=time.time()
+        im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r,dim=imdims),dim=imdims)
+        times[3].append(time.time()-st)
+        st=time.time()
+        for w2 in range(Nw):
+            buffer.zero_()
+            ms=wavelet_mms[w2][0]
+            Ms=wavelet_mms[w2][1]
+
+            if dim==3:
+                buffer[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2][None,:,:,:]
+            elif dim==2:
+                buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w2][None,:,:]
+                
+            im2_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
+            coeffs2.append(torch.sum(torch.sqrt(im2_r.real**2+im2_r.imag**2),dim=imdims))
+        times[4].append(time.time()-st)
+
+    if m==2:
+        coeffs.extend(coeffs2)
+    return torch.stack(coeffs).T,times
 
 def disp(wst,nf,m=2,each_norm=False,flip_rl=False,r=6,l=8):
     if type(wst)!=np.ndarray:
@@ -324,7 +330,7 @@ def disp(wst,nf,m=2,each_norm=False,flip_rl=False,r=6,l=8):
     feed=wst.copy()
     if flip_rl:
         feed[3:2+nf]=feed[3:2+nf].reshape(l,r).T.reshape(-1)
-        
+
         temp=feed[2+nf:].reshape(1+r*l,1+r*l)
         temp[1:,0]=temp[1:,0].reshape(l,r).T.reshape(-1)
         temp[0,1:]=temp[0,1:].reshape(l,r).T.reshape(-1)
@@ -418,7 +424,7 @@ def Pk3d_batched():
 """
 
 
-def make_rings(N,NR=16,dtype=torch.float64,btype="log",ret_ks=False):
+def make_rings_prev(N,NR=16,dtype=torch.float64,btype="lin",return_ks=False):
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
     kx,ky=torch.meshgrid(k_arr,k_arr)
     k_abs=torch.sqrt(kx**2+ky**2)
@@ -447,38 +453,68 @@ def make_rings(N,NR=16,dtype=torch.float64,btype="log",ret_ks=False):
     dcw*=(1-torch.sum(radials,dim=0))
 
     rings=torch.cat([dcw[None,:,:],radials],dim=0).to(dtype=dtype)
-    if ret_ks:
+    if return_ks:
         return rings,torch.cat((torch.tensor([0.],dtype=dtype),rs[1:-1]),)
     return rings
 
+def make_rings(N,rs_dimless,dtype=torch.float64,return_ks=False):
+    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
+    kx,ky=torch.meshgrid(k_arr,k_arr)
+    k_abs=torch.sqrt(kx**2+ky**2)
+    k_theta=torch.atan2(ky,kx)
+    rs=rs_dimless
+    r_dists=(rs[1:]-rs[:-1])
 
+    radials=[]
+    for r,prev_dist,post_dist in zip(rs[1:-1],r_dists[:-1],r_dists[1:]):
+        diff=k_abs-r
+        t=torch.abs(diff)
+        t_prev=t/prev_dist
+        t_post=t/post_dist
+        prev=(2*t_prev**3-3*t_prev**2+1)*(t<prev_dist)*(diff<=0)
+        post=(2*t_post**3-3*t_post**2+1)*(t<post_dist)*(diff>0)
+        radials.append(post+prev)
+    radials=torch.stack(radials)
 
-def Bke_batched(images,rings,MAS_corrector=None,inner_vec=False):
+    rings=radials
+    if return_ks:
+        return rings,rs[1:-1]
+    return rings
+
+def Bke_batched(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
     dim=len(images.size())-1
     assert dim==2 or dim==3, "image should be 2D or 3D"
     N=images.size(1)
+    batch=images.size(0)
     imdims=(1,2,3) if dim==3 else (1,2)
     image_k=torch.fft.fftn(images,dim=imdims)
     if MAS_corrector is not None:
         image_k*=MAS_corrector[None]
-    Bkes=[]
     temp=[]
     for ring in rings:
         temp.append(torch.fft.ifftn(image_k*ring[None],dim=imdims).real)
     temp=torch.stack(temp)
     #TODO: triangular inequality
-    if inner_vec:
-        imdimsp1=(2,3,4) if dim==3 else (2,3)
-        for i in range(len(rings)):
-            for j in range(len(rings)):
-                Bkes.append(torch.sum(temp[[i]]*temp[[j]]*temp,dim=imdimsp1))
-        return torch.stack(Bkes).reshape(len(rings)**3,-1).T
-    else:
-        for i in range(len(rings)):
-            for j in range(len(rings)):
-                for k in range(len(rings)):
-                    Bkes.append(torch.sum(temp[i]*temp[j]*temp[k],dim=imdims))
-        return torch.stack(Bkes).T
+    
+    Bkes=[]
+    if configs is None:
+        if inner_vec:
+            imdimsp1=(2,3,4) if dim==3 else (2,3)
+            for i in range(len(rings)):
+                for j in range(len(rings)):
+                    Bkes.append(torch.sum(temp[[i]]*temp[[j]]*temp,dim=imdimsp1))
+            return torch.stack(Bkes).reshape(len(rings)**3,-1).T
+        else:
+            for i in range(len(rings)):
+                for j in range(len(rings)):
+                    for k in range(len(rings)):
+                        Bkes.append(torch.sum(temp[i]*temp[j]*temp[k],dim=imdims))
+            return torch.stack(Bkes).T
+        
+    for (i,j,k) in configs:
+        Bkes.append(torch.sum(temp[i]*temp[j]*temp[k],dim=imdims))
+    return torch.stack(Bkes).T
+
 
 def Bkn(rings):
     Bkns=[]
@@ -539,10 +575,10 @@ def LWT_R(image,wavelets,m=2,rsnl="abs",verbose=False,pknorm=False):
     std,mean=torch.std_mean(image)
     coeffs.append(mean)
     coeffs.append(std)
-    
+
     image=(image-m)/(std+1e-8)
 
-    
+
     image_k=torch.fft.fftn(image)
     if pknorm:
         image_k=image_k/(pknd+1e-9)
@@ -566,38 +602,6 @@ def LWT_R(image,wavelets,m=2,rsnl="abs",verbose=False,pknorm=False):
         coeffs.extend(coeffs2)
     return torch.stack(coeffs)
 
-def make_rings(N,NR=20,dtype=torch.float64,btype="log",ret_ks=False):
-    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
-    kx,ky=torch.meshgrid(k_arr,k_arr)
-    k_abs=torch.sqrt(kx**2+ky**2)
-    k_theta=torch.atan2(ky,kx)
-    if btype=="log":
-        rs=torch.logspace(1,np.log2(N//2),NR+1,base=2)
-    elif btype=="lin":
-        rs=torch.linspace(2,N//2,NR+1)
-    else:
-        assert False, "Not implemented"
-    rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
-    r_dists=(rs[1:]-rs[:-1])
-
-    radials=[]
-    for r,prev_dist,post_dist in zip(rs[1:-1],r_dists[:-1],r_dists[1:]):
-        diff=k_abs-r
-        t=torch.abs(diff)
-        t_prev=t/prev_dist
-        t_post=t/post_dist
-        prev=(2*t_prev**3-3*t_prev**2+1)*(t<prev_dist)*(diff<=0)
-        post=(2*t_post**3-3*t_post**2+1)*(t<post_dist)*(diff>0)
-        radials.append(post+prev)
-    radials=torch.stack(radials)
-
-    dcw=(k_abs<=rs[1]).to(dtype=dtype)
-    dcw*=(1-torch.sum(radials,dim=0))
-
-    rings=torch.cat([dcw[None,:,:],radials],dim=0).to(dtype=dtype)
-    if ret_ks:
-        return rings,torch.cat((torch.tensor([0.],dtype=dtype),rs[1:-1]),)
-    return rings
 
 
 def make_healpix_wavelets(N,NR=8,nside=2,dtype=torch.float64,rough_mem_limit=4000):
@@ -654,7 +658,7 @@ def make_icosahedron_wavelets(N,NR=8,nside=1):
 
 def LWT_R_abs_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
     times=[[],[],[],[],[]]
-    
+
     assert m==0 or m==1 or m==2
     dim=len(image.size())
     N=image.size(0)
@@ -667,7 +671,7 @@ def LWT_R_abs_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
     coeffs.append(std)
     if m==0:
         return torch.stack(coeffs)
-    
+
     image=(image-m)/(std+1e-8)
     image_k=torch.fft.fftshift(torch.fft.fftn(image))
     if m==2:
@@ -683,10 +687,10 @@ def LWT_R_abs_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
 
         ms=wavelet_mms[w1][0]
         Ms=wavelet_mms[w1][1]
-        
+
         times[0].append(time.time()-st)
         st=time.time()
-        
+
         if dim==3:
             buffer[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=image_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1]
         elif dim==2:
@@ -707,7 +711,7 @@ def LWT_R_abs_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
             ms=wavelet_mms[w2][0]
             Ms=wavelet_mms[w2][1]
             buffer.zero_()
-        
+
             if dim==3:
                 buffer[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=im1_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2]
                 im2_r=torch.fft.ifftn(torch.fft.ifftshift(buffer))
