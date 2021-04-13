@@ -12,7 +12,7 @@ import glob
 import time
 
 
-def make_wavelets(N,NR=6,NT=8,twopi=True,dtype=torch.float64,add_z=False,NZ=6,return_bases=False,verbose=False,sqrt=True):
+def make_wavelets(N,NR=6,NT=8,twopi=False,dtype=torch.float64,add_z=False,NZ=6,return_bases=False,verbose=False,sqrt=True):
     if add_z:
         assert twopi
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
@@ -165,7 +165,6 @@ def load_wavelets(name="wavelets1",wpath=None,dtype=torch.float64,device="cpu"):
 
 
 def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
-    times=[[],[],[],[],[]]
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
@@ -193,21 +192,14 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
     if m==2:
         buffer=torch.zeros_like(image_k)
         coeffs2=[]
-
     wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
-        st=time.time()
         if verbose:
             print("Wavelet:",str(w1+1),"/",str(Nw))
         if m==2:
             buffer.zero_()
-
         ms=wavelet_mms[w1][0]
         Ms=wavelet_mms[w1][1]
-
-        times[0].append(time.time()-st)
-        st=time.time()
-
         if dim==3:
             sub=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1][None,:,:,:]
             coeffs.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
@@ -220,16 +212,10 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
             if m==1:
                 continue
             buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=sub
-        times[1].append(time.time()-st)
-        st=time.time()
         im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
         im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
-        times[2].append(time.time()-st)
-        st=time.time()
         im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r,dim=imdims),dim=imdims)
         im1_k_abs2=im1_k.real**2+im1_k.imag**2
-        times[3].append(time.time()-st)
-        st=time.time()
         for w2 in range(Nw):
             ms=wavelet_mms[w2][0]
             Ms=wavelet_mms[w2][1]
@@ -238,14 +224,11 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2][None,:,:,:],dim=imdims))
             elif dim==2:
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2][None,:,:],dim=imdims))
-        times[4].append(time.time()-st)
-
     if m==2:
         coeffs.extend(coeffs2)
-    return torch.stack(coeffs).T,times
+    return torch.stack(coeffs).T
 
 def LWT_R_abs_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
-    times=[[],[],[],[],[]]
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
@@ -276,34 +259,22 @@ def LWT_R_abs_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS
 
     wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
-        st=time.time()
         if verbose:
             print("Wavelet:",str(w1+1),"/",str(Nw))
         if m==2:
             buffer.zero_()
-
         ms=wavelet_mms[w1][0]
         Ms=wavelet_mms[w1][1]
-
-        times[0].append(time.time()-st)
-        st=time.time()
-
         if dim==3:
             buffer[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1][None,:,:,:]
         elif dim==2:
             buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w1][None,:,:]
-        times[1].append(time.time()-st)
-        st=time.time()
         im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
         im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
         coeffs.append(torch.sum(im1_r,dim=imdims))
         if m==1:
             continue
-        times[2].append(time.time()-st)
-        st=time.time()
         im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r,dim=imdims),dim=imdims)
-        times[3].append(time.time()-st)
-        st=time.time()
         for w2 in range(Nw):
             buffer.zero_()
             ms=wavelet_mms[w2][0]
@@ -313,14 +284,11 @@ def LWT_R_abs_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS
                 buffer[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2][None,:,:,:]
             elif dim==2:
                 buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=im1_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w2][None,:,:]
-                
             im2_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
             coeffs2.append(torch.sum(torch.sqrt(im2_r.real**2+im2_r.imag**2),dim=imdims))
-        times[4].append(time.time()-st)
-
     if m==2:
         coeffs.extend(coeffs2)
-    return torch.stack(coeffs).T,times
+    return torch.stack(coeffs).T
 
 def disp(wst,nf,m=2,each_norm=False,flip_rl=False,r=6,l=8):
     if type(wst)!=np.ndarray:
@@ -392,6 +360,37 @@ def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0):
     for i in range(pk_len):
         where=pkind==i
         norm[where]/=counts[i]
+        ks.append(k_abs_flat[where].mean())
+    ks=torch.tensor(ks,dtype=torch.float64)
+    
+    indarr=torch.arange(N)
+    if dim==3:
+        indarr3d=N*N*indarr[:,None,None]+N*indarr[None,:,None]+indarr[None,None,:]
+    else:
+        indarr3d=N*indarr[:,None]+indarr[None,:]
+    ind=torch.stack([pkind,indarr3d.reshape(-1)])
+    
+    pkop=torch.sparse_coo_tensor(ind,norm,(pk_len,N**dim))
+    return ks,pkop
+
+def get_ks_pkopT(N,dim,dtype=torch.float64,MAS_correction=0):
+    imdims=(1,2,3) if dim==3 else (1,2)
+    k_arr=torch.fft.fftfreq(N,1/N,dtype=dtype)
+    k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
+    ksqs=torch.stack([k_p_dim**2 for k_p_dim in k_p_dims]).sum(dim=0)
+    k_abs=torch.sqrt(ksqs)
+    pk_len=int(torch.max(k_abs)+0.5)+1
+    
+    pkind=torch.floor(k_abs+0.5).reshape(-1)
+    _,counts=torch.unique(pkind,return_counts=True)
+    norm=get_MAS_corrector(MAS_correction,N,dim) if MAS_correction in [1,2,3,4] else torch.ones_like(k_abs)
+    norm=norm.reshape(-1)
+    
+    ks=[]
+    k_abs_flat=k_abs.reshape(-1)
+    for i in range(pk_len):
+        where=pkind==i
+        #norm[where]/=counts[i]
         ks.append(k_abs_flat[where].mean())
     ks=torch.tensor(ks,dtype=torch.float64)
     
@@ -516,16 +515,22 @@ def Bke_batched(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
     return torch.stack(Bkes).T
 
 
-def Bkn(rings):
+def Bkn(rings,configs=None):
     Bkns=[]
     temp=[]
     for ring in rings:
         temp.append(torch.fft.ifftn(ring).real)
     #TODO: triangular inequality
-    for i in range(len(rings)):
-        for j in range(len(rings)):
-            for k in range(len(rings)):
-                Bkns.append(torch.sum(temp[i]*temp[j]*temp[k]))
+    
+    if configs is None:
+        for i in range(len(rings)):
+            for j in range(len(rings)):
+                for k in range(len(rings)):
+                    Bkns.append(torch.sum(temp[i]*temp[j]*temp[k]))
+                    
+        return torch.stack(Bkns)
+    for (i,j,k) in configs:
+        Bkns.append(torch.sum(temp[i]*temp[j]*temp[k]))
     return torch.stack(Bkns)
 
 
