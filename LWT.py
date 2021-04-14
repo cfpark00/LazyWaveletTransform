@@ -342,7 +342,7 @@ def get_MAS_corrector(MAS_correction,N,dim,dtype=torch.float64):
         
                                                      
 
-def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0):
+def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0,broadcast_op=False):
     imdims=(1,2,3) if dim==3 else (1,2)
     k_arr=torch.fft.fftfreq(N,1/N,dtype=dtype)
     k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
@@ -359,7 +359,8 @@ def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0):
     k_abs_flat=k_abs.reshape(-1)
     for i in range(pk_len):
         where=pkind==i
-        norm[where]/=counts[i]
+        if not broadcast_op:
+            norm[where]/=counts[i]
         ks.append(k_abs_flat[where].mean())
     ks=torch.tensor(ks,dtype=torch.float64)
     
@@ -373,36 +374,26 @@ def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0):
     pkop=torch.sparse_coo_tensor(ind,norm,(pk_len,N**dim))
     return ks,pkop
 
-def get_ks_pkopT(N,dim,dtype=torch.float64,MAS_correction=0):
+def get_k_kill(ks,kstart,kend,spline_func=None):
+    if spline_func is None:
+        spline_func= lambda t: 2*t**3-3*t**2+1
+    k0=ks[ks<=kstart].fill_(1.)
+    k1=spline_func((ks[(ks>kstart)*(ks<=kend)]-kstart)/(kend-kstart))
+    k2=ks[ks>kend].zero_()
+    return torch.cat([k0,k1,k2],dim=0)
+
+def pk_rescale(images,pks,tpk,pkopT):
+    N=images.shape[1]
+    b=images.shape[0]
+    dim=len(images.size())-1
     imdims=(1,2,3) if dim==3 else (1,2)
-    k_arr=torch.fft.fftfreq(N,1/N,dtype=dtype)
-    k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
-    ksqs=torch.stack([k_p_dim**2 for k_p_dim in k_p_dims]).sum(dim=0)
-    k_abs=torch.sqrt(ksqs)
-    pk_len=int(torch.max(k_abs)+0.5)+1
+    res=(pkopT.t()@torch.sqrt(tpk[None,:]/pks).t() ).t().reshape(b,N,N)
+    res[:,0,0]=0
+    images_k=torch.fft.fftn(images,dim=imdims)
+    images_k*=res
+    images_rescaled=torch.fft.ifftn(images_k,dim=imdims).real
+    return images_rescaled
     
-    pkind=torch.floor(k_abs+0.5).reshape(-1)
-    _,counts=torch.unique(pkind,return_counts=True)
-    norm=get_MAS_corrector(MAS_correction,N,dim) if MAS_correction in [1,2,3,4] else torch.ones_like(k_abs)
-    norm=norm.reshape(-1)
-    
-    ks=[]
-    k_abs_flat=k_abs.reshape(-1)
-    for i in range(pk_len):
-        where=pkind==i
-        #norm[where]/=counts[i]
-        ks.append(k_abs_flat[where].mean())
-    ks=torch.tensor(ks,dtype=torch.float64)
-    
-    indarr=torch.arange(N)
-    if dim==3:
-        indarr3d=N*N*indarr[:,None,None]+N*indarr[None,:,None]+indarr[None,None,:]
-    else:
-        indarr3d=N*indarr[:,None]+indarr[None,:]
-    ind=torch.stack([pkind,indarr3d.reshape(-1)])
-    
-    pkop=torch.sparse_coo_tensor(ind,norm,(pk_len,N**dim))
-    return ks,pkop
 
 def pk_batched(images,pkop):
     dim=len(images.size())-1
