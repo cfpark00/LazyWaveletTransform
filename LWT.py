@@ -6,6 +6,7 @@ import numpy as np
 
 import scipy.interpolate as sintp
 import scipy.ndimage as sim
+import scipy.stats as sstats
 import os
 import glob
 
@@ -141,6 +142,16 @@ def wavelet_to_mm_val(wavelet):
     elif dim==2:
         return np.array([ms,Ms]),wavelet_shifted[ms[0]:Ms[0],ms[1]:Ms[1]].clone()
 
+def get_dense_wavelet(N,dim,wavelet_mm,wavelet_val):
+    filler=torch.zeros([N for _ in range(dim)])
+    ms=wavelet_mm[0]
+    Ms=wavelet_mm[1]
+    if dim==2:
+        filler[ms[0]:Ms[0],ms[1]:Ms[1]]=wavelet_val
+    elif dim==3:
+        filler[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=wavelet_val
+    return filler
+    
 def save_wavelets(wavelet_mms,wavelet_vals,name,wpath=None):
     if wpath is None:
         wpath=os.path.join(os.path.split(__file__)[0],"wavelets",name)
@@ -151,11 +162,11 @@ def save_wavelets(wavelet_mms,wavelet_vals,name,wpath=None):
         np.save(os.path.join(wpath,"val_"+str(i)+".npy"),wavelet_vals[i].cpu().detach().numpy())
 
 
-def load_wavelets(name="wavelets1",wpath=None,dtype=torch.float64,device="cpu"):
+def load_wavelets(name,wpath=None,dtype=torch.float64,device="cpu"):
     if wpath is None:
         wpath=os.path.join(os.path.split(__file__)[0],"wavelets",name)
-    fs=glob.glob(os.path.join(wpath,"*"))
-    Nf=len(fs)//2
+    fs=glob.glob(os.path.join(wpath,"mm_*"))
+    Nf=len(fs)
     wavelet_mms=[]
     wavelet_vals=[]
     for i in range(Nf):
@@ -163,8 +174,19 @@ def load_wavelets(name="wavelets1",wpath=None,dtype=torch.float64,device="cpu"):
         wavelet_vals.append(torch.tensor(np.load(os.path.join(wpath,"val_"+str(i)+".npy")),dtype=dtype,device=device))
     return wavelet_mms,wavelet_vals
 
+def get_apodizer(N,dim,apstart=3/4):
+    cent=(N-1)/2
+    arr=torch.arange(N)
+    r=torch.sqrt(((torch.stack(torch.meshgrid(*[arr for _ in range(dim)]),dim=0)-cent)**2).sum(0))/cent
+    apodizer=torch.zeros_like(r)
+    r_rec=(r-apstart)*4
+    apodizer=2*r_rec**3-3*r_rec**2+1
+    apodizer[r<=apstart]=1
+    apodizer[r>1]=0
+    return apodizer
+    
 
-def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
+def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
@@ -228,7 +250,7 @@ def LWT_R_abs2_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MA
         coeffs.extend(coeffs2)
     return torch.stack(coeffs).T
 
-def LWT_R_abs_fast_batched(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
+def WST_abs(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
@@ -338,9 +360,7 @@ def get_MAS_corrector(MAS_correction,N,dim,dtype=torch.float64):
         MAS_corrector=1/(torch.sinc(k_p_dims[0])*torch.sinc(k_p_dims[1])*torch.sinc(k_p_dims[2]))
     else:
         MAS_corrector=1/(torch.sinc(k_p_dims[0])*torch.sinc(k_p_dims[1]))
-    return MAS_corrector**MAS_correction
-        
-                                                     
+    return MAS_corrector**MAS_correction                                    
 
 def get_ks_pkop(N,dim,dtype=torch.float64,MAS_correction=0,broadcast_op=False):
     imdims=(1,2,3) if dim==3 else (1,2)
@@ -382,20 +402,64 @@ def get_k_kill(ks,kstart,kend,spline_func=None):
     k2=ks[ks>kend].zero_()
     return torch.cat([k0,k1,k2],dim=0)
 
-def pk_rescale(images,pks,tpk,pkopT):
+def pk_rescale(images,pks,tpks,pkopT,rayleigh=False):
     N=images.shape[1]
+    assert N%2==0,"odd N not allowed yet"
     b=images.shape[0]
     dim=len(images.size())-1
     imdims=(1,2,3) if dim==3 else (1,2)
-    res=(pkopT.t()@torch.sqrt(tpk[None,:]/pks).t() ).t().reshape(b,N,N)
+    assert dim==2,"3D not implemented"
+    res=(pkopT.t()@torch.sqrt(tpks/pks).t() ).t().reshape(b,N,N)
     res[:,0,0]=0
-    images_k=torch.fft.fftn(images,dim=imdims)
-    images_k*=res
-    images_rescaled=torch.fft.ifftn(images_k,dim=imdims).real
-    return images_rescaled
     
+    sh=(N,N)
+    k_ny_ind=N//2
+    res=res[:,:,:k_ny_ind+1]
+    
+    if rayleigh is True:
+        mult=torch.sqrt(-torch.log(torch.rand(res.shape,device=res.device)))
+        while torch.isnan(mult).any() or torch.isinf(mult).any():
+            mult=torch.sqrt(-torch.log(torch.rand(res.shape,device=res.device)))
+        mult[:,k_ny_ind+1:,0]=mult[:,1:k_ny_ind,0] #hermitianity
+        res*=mult
+    elif not(rayleigh is False):
+        res*=rayleigh
+        
+    images_k=torch.fft.rfftn(images,dim=imdims)
+    images_k*=res
+    images_rescaled=torch.fft.irfftn(images_k,dim=imdims,s=sh)
+    return images_rescaled
 
-def pk_batched(images,pkop):
+def get_gaussian_random_field(N,dim,pks,pkopT,rayleigh=False):
+    assert N%2==0,"odd N not allowed yet"
+    b=pks.shape[0]
+    imdims=(1,2,3) if dim==3 else (1,2)
+    assert dim==2,"3D not implemented"
+    res=(pkopT.t()@torch.sqrt(pks).t()).t().reshape(b,N,N)
+    res[:,0,0]=torch.sqrt(pks[:,0])
+    
+    sh=(N,N)
+    k_ny_ind=N//2
+    res=res[:,:,:k_ny_ind+1]
+    
+    if rayleigh is True:
+        mult=torch.sqrt(-torch.log(torch.rand(res.shape,device=res.device)))
+        while torch.isnan(mult).any() or torch.isinf(mult).any():
+            mult=torch.sqrt(-torch.log(torch.rand(res.shape,device=res.device)))
+        mult[:,k_ny_ind+1:,0]=mult[:,1:k_ny_ind,0] #hermitianity
+        res*=mult
+    elif not(rayleigh is False):
+        res*=rayleigh
+    
+    phases=torch.rand(res.shape,device=res.device,dtype=res.dtype)
+    phases[:,k_ny_ind+1:,0]=mult[:,1:k_ny_ind,0]
+    
+    images_k=torch.exp(1j*2*np.pi*phases)
+    images_k*=res
+    images_rescaled=torch.fft.irfftn(images_k,dim=imdims,s=sh)
+    return images_rescaled
+
+def pk(images,pkop):
     dim=len(images.size())-1
     batch=images.size(0)
     imdims=(1,2,3) if dim==3 else (1,2)
@@ -403,56 +467,24 @@ def pk_batched(images,pkop):
     images_k_abs=images_k.real**2+images_k.imag**2
     pks=(pkop@images_k_abs.reshape(batch,-1).T).T
     return pks
+
+
+def make_rings(N,dim,NR=16,rs_dimless=None,btype="lin",dtype=torch.float64,return_ks=False):
+    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
+    k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
+    ksqs=torch.stack([k_p_dim**2 for k_p_dim in k_p_dims]).sum(dim=0)
+    k_abs=torch.sqrt(ksqs)
     
-"""
-def Pk3d_batched():
-    if not keepdim:
-        return ks,Pks
-    res=np.zeros_like(images)
-    intp=sintp.interp1d(ks.cpu().detach().numpy(),Pks.cpu().detach().numpy())
-    return ks,Pks,torch.tensor(intp(k_abs.cpu().detach().numpy()))
-"""
-
-
-def make_rings_prev(N,NR=16,dtype=torch.float64,btype="lin",return_ks=False):
-    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
-    kx,ky=torch.meshgrid(k_arr,k_arr)
-    k_abs=torch.sqrt(kx**2+ky**2)
-    k_theta=torch.atan2(ky,kx)
-    if btype=="log":
-        rs=torch.logspace(1,np.log2(N//2),NR,base=2)
-    elif btype=="lin":
-        rs=torch.linspace(2,N//2,NR)
+    if rs_dimless is not None:
+        rs=rs_dimless
     else:
-        assert False, "Not implemented"
-    rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
-    r_dists=(rs[1:]-rs[:-1])
-
-    radials=[]
-    for r,prev_dist,post_dist in zip(rs[1:-1],r_dists[:-1],r_dists[1:]):
-        diff=k_abs-r
-        t=torch.abs(diff)
-        t_prev=t/prev_dist
-        t_post=t/post_dist
-        prev=(2*t_prev**3-3*t_prev**2+1)*(t<prev_dist)*(diff<=0)
-        post=(2*t_post**3-3*t_post**2+1)*(t<post_dist)*(diff>0)
-        radials.append(post+prev)
-    radials=torch.stack(radials)
-
-    dcw=(k_abs<=rs[1]).to(dtype=dtype)
-    dcw*=(1-torch.sum(radials,dim=0))
-
-    rings=torch.cat([dcw[None,:,:],radials],dim=0).to(dtype=dtype)
-    if return_ks:
-        return rings,torch.cat((torch.tensor([0.],dtype=dtype),rs[1:-1]),)
-    return rings
-
-def make_rings(N,rs_dimless,dtype=torch.float64,return_ks=False):
-    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
-    kx,ky=torch.meshgrid(k_arr,k_arr)
-    k_abs=torch.sqrt(kx**2+ky**2)
-    k_theta=torch.atan2(ky,kx)
-    rs=rs_dimless
+        if btype=="log":
+            rs=torch.logspace(1,np.log2(N//2),NR,base=2)
+        elif btype=="lin":
+            rs=torch.linspace(2,N//2,NR)
+        else:
+            assert False, "Not implemented"
+        rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
     r_dists=(rs[1:]-rs[:-1])
 
     radials=[]
@@ -471,7 +503,7 @@ def make_rings(N,rs_dimless,dtype=torch.float64,return_ks=False):
         return rings,rs[1:-1]
     return rings
 
-def Bke_batched(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
+def bke(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
     dim=len(images.size())-1
     assert dim==2 or dim==3, "image should be 2D or 3D"
     N=images.size(1)
@@ -506,7 +538,7 @@ def Bke_batched(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
     return torch.stack(Bkes).T
 
 
-def Bkn(rings,configs=None):
+def bkn(rings,configs=None):
     Bkns=[]
     temp=[]
     for ring in rings:
@@ -525,12 +557,61 @@ def Bkn(rings,configs=None):
     return torch.stack(Bkns)
 
 
+def get_rwst(x,r=6,l=8):
+    nf=1+r*l
+    assert x.shape[1]==(2+nf+nf**2)
+    b=x.shape[0]
+    s0=x[:,:2]
+    s1dc=x[:,3]
+    s1=x[:,3:3+r*l].reshape(b,r,l).sum(2)
+    s2=x[:,2+nf:].reshape(b,nf,nf)
+    s2dcdc=s2[:,0,0][:,None]
+    s2dc1=s2[:,0,1:].reshape(b,r,l).sum(2)
+    s2dc2=s2[:,1:,0].reshape(b,r,l).sum(2)
+    s2=s2[:,1:,1:].reshape(b,r,l,r,l).transpose(0,1,3,2,4).reshape(b,r*r,l,l)
+    s2roll=[]
+    for l_ in range(l):
+        s2roll.append(np.roll(s2[:,:,l_,:],-l_,axis=2))
+    s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
+    rwst=np.concatenate([s0,s1dc[:,None],s1,s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
+    return rwst
 
 
+def batched_run(func,data,args,batch_size,outsel=None,verbose=False):
+    N_tot=data.shape[0]
+    jwsts_g=[]
+    N_rep=N_tot//batch_size
+    if (N_tot%batch_size)!=0:
+        N_rep+=1
+    outlist=[]
+    for i in range(N_rep):
+        if verbose:
+            print("\r",i+1,"/",N_rep,end="")
+        ten=data[i*batch_size:min((i+1)*batch_size,N_tot)]
+        res=func(ten,*args)
+        if outsel is not None:
+            res=res[outsel]
+        outlist.append(res)
+    if verbose:
+        print()
+    return outlist
 
 
+def gaussianize_pdf(data,target_ppf=sstats.norm(loc=0.0,scale=1.0).ppf):
+    sh=data.shape
+    data=data.copy().flatten()
+    hist,bin_edges=np.histogram(data,bins='auto')
+    r=sstats.rv_histogram((hist,bin_edges))
+    
+    min2i=np.argpartition(data, 2)[:2]
+    max2i=np.argpartition(-data, 2)[:2]
+    
+    data[min2i[0]]=data[min2i[1]]
+    data[max2i[0]]=data[max2i[1]]
+    
+    gdata=target_ppf(r.cdf(data))
 
-
+    return gdata.reshape(sh)
 
 
 
