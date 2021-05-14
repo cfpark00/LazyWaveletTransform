@@ -186,7 +186,7 @@ def get_apodizer(N,dim,apstart=3/4):
     return apodizer
     
 
-def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
+def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None,cross_correlate=False,cross_correlate_in_memory=True):
     assert m==0 or m==1 or m==2
     dim=len(images.size())-1
     assert dim==2 or dim==3
@@ -214,6 +214,8 @@ def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=Non
     if m==2:
         buffer=torch.zeros_like(image_k)
         coeffs2=[]
+    if cross_correlate:
+        maps=[]
     wavelet_sqs=[wavelet**2 for wavelet in wavelet_vals]
     for w1 in range(Nw):
         if verbose:
@@ -225,17 +227,21 @@ def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=Non
         if dim==3:
             sub=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1][None,:,:,:]
             coeffs.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
-            if m==1:
+            if m==1 and not cross_correlate:
                 continue
             buffer[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=sub
         elif dim==2:
             sub=image_k[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w1][None,:,:]
             coeffs.append(torch.sum(sub.real**2+sub.imag**2,dim=imdims))
-            if m==1:
+            if m==1 and not cross_correlate:
                 continue
             buffer[:,ms[0]:Ms[0],ms[1]:Ms[1]]=sub
         im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer,dim=imdims),dim=imdims)
         im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
+        if cross_correlate:
+            maps.append(im1_r)
+        if m==1:
+            continue
         im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r,dim=imdims),dim=imdims)
         im1_k_abs2=im1_k.real**2+im1_k.imag**2
         for w2 in range(Nw):
@@ -246,6 +252,8 @@ def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=Non
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2][None,:,:,:],dim=imdims))
             elif dim==2:
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2][None,:,:],dim=imdims))
+    if cross_correlate:
+        coeffs2
     if m==2:
         coeffs.extend(coeffs2)
     return torch.stack(coeffs).T
