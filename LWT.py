@@ -487,9 +487,9 @@ def make_rings(N,dim,NR=16,rs_dimless=None,btype="lin",dtype=torch.float64,retur
         rs=rs_dimless
     else:
         if btype=="log":
-            rs=torch.logspace(1,np.log2(N//2),NR,base=2)
+            rs=torch.logspace(1,np.log2(N//2),NR+1,base=2)
         elif btype=="lin":
-            rs=torch.linspace(2,N//2,NR)
+            rs=torch.linspace(2,N//2,NR+1)
         else:
             assert False, "Not implemented"
         rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
