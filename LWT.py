@@ -460,7 +460,7 @@ def get_gaussian_random_field(N,dim,pks,pkopT,rayleigh=False):
         res*=rayleigh
     
     phases=torch.rand(res.shape,device=res.device,dtype=res.dtype)
-    phases[:,k_ny_ind+1:,0]=mult[:,1:k_ny_ind,0]
+    phases[:,k_ny_ind+1:,0]=phases[:,1:k_ny_ind,0]
     
     images_k=torch.exp(1j*2*np.pi*phases)
     images_k*=res
