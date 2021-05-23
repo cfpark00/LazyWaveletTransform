@@ -565,23 +565,42 @@ def bkn(rings,configs=None):
     return torch.stack(Bkns)
 
 
-def get_rwst(x,r=6,l=8):
-    nf=1+r*l
-    assert x.shape[1]==(2+nf+nf**2)
-    b=x.shape[0]
-    s0=x[:,:2]
-    s1dc=x[:,3]
-    s1=x[:,3:3+r*l].reshape(b,r,l).sum(2)
-    s2=x[:,2+nf:].reshape(b,nf,nf)
-    s2dcdc=s2[:,0,0][:,None]
-    s2dc1=s2[:,0,1:].reshape(b,r,l).sum(2)
-    s2dc2=s2[:,1:,0].reshape(b,r,l).sum(2)
-    s2=s2[:,1:,1:].reshape(b,r,l,r,l).transpose(0,1,3,2,4).reshape(b,r*r,l,l)
-    s2roll=[]
-    for l_ in range(l):
-        s2roll.append(np.roll(s2[:,:,l_,:],-l_,axis=2))
-    s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
-    rwst=np.concatenate([s0,s1dc[:,None],s1,s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
+def get_rwst(x,NR=6,NT=8,NZ=None):
+    if NZ is None:#2d case
+        NF=1+NR*NT
+        assert x.shape[1]==(2+NF+NF**2)
+        b=x.shape[0]
+        s0=x[:,:2]
+        s1dc=x[:,2]
+        s1=x[:,3:3+NR*NT].reshape(b,NR,NT).sum(2)
+        s2=x[:,2+NF:].reshape(b,NF,NF)
+        s2dcdc=s2[:,0,0][:,None]
+        s2dc1=s2[:,0,1:].reshape(b,NR,NT).sum(2)
+        s2dc2=s2[:,1:,0].reshape(b,NR,NT).sum(2)
+        s2=s2[:,1:,1:].reshape(b,NR,NT,NR,NT).transpose(0,1,3,2,4).reshape(b,NR*NR,NT,NT)
+        s2roll=[]
+        for l_ in range(NT):
+            s2roll.append(np.roll(s2[:,:,l_,:],-l_,axis=2))
+        s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
+        rwst=np.concatenate([s0,s1dc[:,None],s1,s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
+    else:
+        NF=(1+NR*NT)*NZ
+        assert x.shape[1]==(2+NF+NF**2)
+        b=x.shape[0]
+        s0=x[:,:2]
+        s1dcz=x[:,2:2+NZ]
+        s1=x[:,2+NZ:2+NZ+NR*NT*NZ].reshape(b,NR,NT,NZ).sum(2).reshape(b,-1)
+        
+        s2=x[:,2+NF:].reshape(b,NF,NF)
+        s2dczdcz=s2[:,:NZ,:NZ].reshape(b,-1)
+        s2dcz1=s2[:,:NZ,NZ:].reshape(b,NZ,NR,NT,NZ).sum(3).reshape(b,-1)
+        s2dcz2=s2[:,NZ:,:NZ].reshape(b,NR,NT,NZ,NZ).sum(2).reshape(b,-1)
+        s2=s2[:,NZ:,NZ:].reshape(b,NR,NT,NZ,NR,NT,NZ).transpose(0,1,3,4,6,2,5).reshape(b,NR*NZ*NR*NZ,NT,NT)
+        s2roll=[]
+        for l_ in range(NT):
+            s2roll.append(np.roll(s2[:,:,l_,:],-l_,axis=2))
+        s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
+        rwst=np.concatenate([s0,s1dcz,s1,s2dczdcz,s2dcz1,s2dcz2,s2roll],axis=1)
     return rwst
 
 
@@ -625,67 +644,50 @@ def gaussianize_pdf(data,target_ppf=sstats.norm(loc=0.0,scale=1.0).ppf):
 
 
 
+######Visualization
+def hsv2rgb(im_hsv):
+    h=im_hsv[:,:,0]
+    s=im_hsv[:,:,1]
+    v=im_hsv[:,:,2]
+    h=np.mod(h,2*np.pi)
+    h60= h/(np.pi/3)
+    h60f = np.floor(h60)
+    section = (h60f.astype(np.int16) % 6)[:,:,None]
+    f = h60 - h60f
+    p = v * (1 - s)
+    q = v * (1 - f * s)
+    t = v * (1 - (1 - f) * s)
+    
+    res=np.stack([v,t,p],axis=2)
+    res=np.where(section==1,np.stack([q,v,p],axis=2),res)
+    res=np.where(section==2,np.stack([p,v,t],axis=2),res)
+    res=np.where(section==3,np.stack([p,q,v],axis=2),res)
+    res=np.where(section==4,np.stack([t,p,v],axis=2),res)
+    res=np.where(section==5,np.stack([v,p,q],axis=2),res)
+    return res
+
+def complex_image(dk,normfunc=None,mag=True):
+    if normfunc is None:
+        normfunc=lambda x: np.arcsinh(x/np.std(x))
+    if mag:
+        mag=normfunc(np.abs(dk))
+        mag-=np.min(mag)
+        mag/=np.max(mag)
+        s=np.ones_like(dk,dtype=np.float64)
+    else:
+        s=mag=np.ones_like(dk,dtype=np.float64)
+    phase=np.angle(dk)+np.pi
+    arr=hsv2rgb(np.stack([phase,s,mag],axis=2))
+    return arr
+
+
+
 
 
 
 
 
 ####################################
-
-
-
-def LWT_R(image,wavelets,m=2,rsnl="abs",verbose=False,pknorm=False):
-    dim=len(image.size())
-    assert dim==2 or dim==3, "image should be 2D or 3D"
-    N=image.size(0)
-    assert m in [0,1,2], "m should be 0,1,2"
-    assert all([s==N for s in image.size()]),"image not "+str(dim)+"-cube"
-    assert len(wavelets[0].size())==dim,"Wavelets not right."
-
-    assert rsnl in ["abs","abs2","logabsp1"],"Only abs,abs2,logabsp1 implemented"
-    if rsnl=="abs":
-        rsnl=torch.abs
-    elif rsnl=="abs2": #Yes, I know parseval's theorem, but didn't care yet....
-        rsnl=lambda x: torch.abs(x)**2
-    elif rsnl=="logabsp1":
-        rsnl=lambda x: torch.log(torch.abs(x)+1)
-    else:
-        assert False,"bug cfpark00"
-
-    if pknorm:
-        ks,Pks,pknd=Pk(image,keepdim=True)
-
-    Nw=len(wavelets)
-    coeffs=[]
-    std,mean=torch.std_mean(image)
-    coeffs.append(mean)
-    coeffs.append(std)
-
-    image=(image-m)/(std+1e-8)
-
-
-    image_k=torch.fft.fftn(image)
-    if pknorm:
-        image_k=image_k/(pknd+1e-9)
-        coeffs.extend(Pks)
-    if m==2:
-        coeffs2=[]
-    if m==0:
-        return torch.stack(coeffs)
-    for w1 in range(Nw):
-        if verbose:
-            print("Wavelet:",str(w1+1),"/",str(Nw))
-        im1_r=rsnl(torch.fft.ifftn(image_k*wavelets[w1]))
-        coeffs.append(torch.sum(im1_r))
-        if m==1:
-            continue
-        im1_f=torch.fft.fftn(im1_r)
-        for w2 in range(Nw):
-            im2_r=rsnl(torch.fft.ifftn(im1_f*wavelets[w2]))
-            coeffs2.append(torch.sum(im2_r))
-    if m==2:
-        coeffs.extend(coeffs2)
-    return torch.stack(coeffs)
 
 
 
@@ -740,79 +742,6 @@ def make_icosahedron_wavelets(N,NR=8,nside=1):
 
 
 
-
-def LWT_R_abs_fast(image,wavelet_mms,wavelet_vals,m=2,verbose=False):
-    times=[[],[],[],[],[]]
-
-    assert m==0 or m==1 or m==2
-    dim=len(image.size())
-    N=image.size(0)
-    Nw=len(wavelet_mms)
-    assert Nw==len(wavelet_vals)
-
-    coeffs=[]
-    std,mean=torch.std_mean(image)
-    coeffs.append(mean)
-    coeffs.append(std)
-    if m==0:
-        return torch.stack(coeffs)
-
-    image=(image-m)/(std+1e-8)
-    image_k=torch.fft.fftshift(torch.fft.fftn(image))
-    if m==2:
-        buffer=torch.zeros_like(image_k)
-        coeffs2=[]
-
-    for w1 in range(Nw):
-        st=time.time()
-        if verbose:
-            print("Wavelet:",str(w1+1),"/",str(Nw))
-        if m==2:
-            buffer.zero_()
-
-        ms=wavelet_mms[w1][0]
-        Ms=wavelet_mms[w1][1]
-
-        times[0].append(time.time()-st)
-        st=time.time()
-
-        if dim==3:
-            buffer[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=image_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w1]
-        elif dim==2:
-            buffer[ms[0]:Ms[0],ms[1]:Ms[1]]=image_k[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w1]
-        times[1].append(time.time()-st)
-        st=time.time()
-        im1_r=torch.fft.ifftn(torch.fft.ifftshift(buffer))
-        im1_r=torch.sqrt(im1_r.real**2+im1_r.imag**2)
-        coeffs.append(torch.sum(im1_r))
-        times[2].append(time.time()-st)
-        st=time.time()
-        if m==1:
-            continue
-        im1_k=torch.fft.fftshift(torch.fft.fftn(im1_r))
-        times[3].append(time.time()-st)
-        st=time.time()
-        for w2 in range(Nw):
-            ms=wavelet_mms[w2][0]
-            Ms=wavelet_mms[w2][1]
-            buffer.zero_()
-
-            if dim==3:
-                buffer[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]=im1_k[ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_vals[w2]
-                im2_r=torch.fft.ifftn(torch.fft.ifftshift(buffer))
-                coeffs2.append(torch.sqrt(im2_r.real**2+im2_r.imag**2).sum())
-            elif dim==2:
-                buffer[ms[0]:Ms[0],ms[1]:Ms[1]]=im1_k[ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_vals[w2]
-                im2_r=torch.fft.ifftn(torch.fft.ifftshift(buffer))
-                coeffs2.append(torch.sqrt(im2_r.real**2+im2_r.imag**2).sum())
-        times[4].append(time.time()-st)
-
-
-    if m==2:
-        coeffs.extend(coeffs2)
-    return torch.stack(coeffs),times
-
-
 def LIest(image,scales=None,NR=8,max_offset=10):
     N=image.size(0)
     if scales is None:
@@ -828,7 +757,3 @@ def LIest(image,scales=None,NR=8,max_offset=10):
             coeffs.append(torch.sum(torch.sqrt(torch.abs(torch.roll(im,offset,1)*im)))/(N*N)  )
     return torch.stack(coeffs)
 
-
-def asinhnorm(im):
-    std=np.std(im)
-    return np.arcsinh(im/std)
