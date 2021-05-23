@@ -252,10 +252,27 @@ def WST_abs2(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=Non
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1],ms[2]:Ms[2]]*wavelet_sqs[w2][None,:,:,:],dim=imdims))
             elif dim==2:
                 coeffs2.append(torch.sum(im1_k_abs2[:,ms[0]:Ms[0],ms[1]:Ms[1]]*wavelet_sqs[w2][None,:,:],dim=imdims))
-    if cross_correlate:
-        coeffs2
     if m==2:
         coeffs.extend(coeffs2)
+    if cross_correlate:
+        b=images.shape[0]
+        if cross_correlate_in_memory:
+            maps=torch.stack(maps,dim=1)
+            maps=maps.reshape(b,Nw,-1)
+            coeffs_cc=torch.bmm(maps,maps.permute(0,2,1)).reshape(b,-1).T
+        else:
+            coeffs_cc=torch.zeros(Nw,Nw,b,device=images.device,dtype=images.dtype)
+            for i,map_1 in enumerate(maps):
+                for j,map_2 in enumerate(maps):
+                    if j>i:
+                        continue
+                    val=torch.sum(map_1*map_2,dim=imdims)
+                    coeffs_cc[i,j]=val
+                    if i!=j:
+                        coeffs_cc[j,i]=val
+            coeffs_cc=coeffs_cc.reshape(-1,b)
+    if cross_correlate:
+        coeffs.extend(coeffs_cc)
     return torch.stack(coeffs).T
 
 def WST_abs(images,wavelet_mms,wavelet_vals,m=2,verbose=False,MAS_corrector=None):
@@ -417,7 +434,9 @@ def pk_rescale(images,pks,tpks,pkopT,rayleigh=False):
     dim=len(images.size())-1
     imdims=(1,2,3) if dim==3 else (1,2)
     assert dim==2,"3D not implemented"
-    res=(pkopT.t()@torch.sqrt(tpks/pks).t() ).t().reshape(b,N,N)
+    fac=torch.sqrt(tpks/pks)
+    fac[pks==0]=0
+    res=(pkopT.t()@fac.t() ).t().reshape(b,N,N)
     res[:,0,0]=0
     
     sh=(N,N)
@@ -584,6 +603,21 @@ def get_rwst(x,r=6,l=8):
     rwst=np.concatenate([s0,s1dc[:,None],s1,s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
     return rwst
 
+def get_rwst_cc(x,r=6,l=8):
+    nf=1+r*l
+    assert x.shape[1]==(nf**2)
+    b=x.shape[0]
+    cc=x.reshape(b,nf,nf)
+    s2dcdc=cc[:,0,0][:,None]
+    s2dc1=cc[:,0,1:].reshape(b,r,l).sum(2)
+    s2dc2=cc[:,1:,0].reshape(b,r,l).sum(2)
+    cc=cc[:,1:,1:].reshape(b,r,l,r,l).transpose(0,1,3,2,4).reshape(b,r*r,l,l)
+    s2roll=[]
+    for l_ in range(l):
+        s2roll.append(np.roll(cc[:,:,l_,:],-l_,axis=2))
+    s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
+    rwst=np.concatenate([s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
+    return rwst
 
 def batched_run(func,data,args,batch_size,outsel=None,verbose=False):
     N_tot=data.shape[0]
