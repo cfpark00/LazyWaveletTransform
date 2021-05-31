@@ -496,7 +496,7 @@ def pk(images,pkop):
     return pks
 
 
-def make_rings(N,dim,NR=16,rs_dimless=None,btype="lin",dtype=torch.float64,return_ks=False):
+def make_spline_rings(N,dim,NR=16,rs_dimless=None,btype="lin",dtype=torch.float64,return_ks=False):
     k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
     k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
     ksqs=torch.stack([k_p_dim**2 for k_p_dim in k_p_dims]).sum(dim=0)
@@ -528,6 +528,40 @@ def make_rings(N,dim,NR=16,rs_dimless=None,btype="lin",dtype=torch.float64,retur
     rings=radials
     if return_ks:
         return rings,rs[1:-1]
+    return rings
+
+def make_exp_rings(N,dim,NR=16,rs_dimless=None,sigmas_dimless=None,btype="lin",dtype=torch.float64,return_ks=False):
+    k_arr=torch.fft.fftfreq(N,1/N).to(dtype=dtype)
+    k_p_dims=torch.meshgrid(*(k_arr for _ in range(dim)))
+    ksqs=torch.stack([k_p_dim**2 for k_p_dim in k_p_dims]).sum(dim=0)
+    k_abs=torch.sqrt(ksqs)
+    
+    if rs_dimless is not None:
+        rs=rs_dimless
+    else:
+        if btype=="log":
+            rs=torch.logspace(1,np.log2(N//2),NR-1,base=2)
+        elif btype=="lin":
+            rs=torch.linspace(2,N//2,NR-1)
+        else:
+            assert False, "Not implemented"
+        rs=torch.cat([torch.zeros(1),rs],dim=0).to(dtype=dtype)
+
+    if sigmas_dimless is not None:
+        sigmas=sigmas_dimless
+    else:
+        r_dists_=torch.abs(rs[1:]-rs[:-1])
+        r_distsavg=(r_dists_[1:]+r_dists_[:-1])/2
+        sigmas=torch.cat([r_distsavg[[0]],r_distsavg,r_distsavg[[-1]]],dim=0).to(dtype=dtype)
+        
+    radials=[]
+    for r,sigma in zip(rs,sigmas):
+        radials.append(torch.exp( -( ((k_abs-r)**2)/(2*sigma**2) ) ) / (sigma*np.sqrt(2*np.pi)) )
+    radials=torch.stack(radials)
+
+    rings=radials
+    if return_ks:
+        return rings,rs
     return rings
 
 def bke(images,rings,configs=None,MAS_corrector=None,inner_vec=False):
@@ -622,17 +656,17 @@ def get_rwst(x,NR=6,NT=8,NZ=None):
         rwst=np.concatenate([s0,s1dcz,s1,s2dczdcz,s2dcz1,s2dcz2,s2roll],axis=1)
     return rwst
 
-def get_rwst_cc(x,r=6,l=8):
-    nf=1+r*l
-    assert x.shape[1]==(nf**2)
+def get_rwst_cc(x,NR=6,NT=8):
+    NF=1+NR*NT
+    assert x.shape[1]==(NF**2)
     b=x.shape[0]
-    cc=x.reshape(b,nf,nf)
+    cc=x.reshape(b,NF,NF)
     s2dcdc=cc[:,0,0][:,None]
-    s2dc1=cc[:,0,1:].reshape(b,r,l).sum(2)
-    s2dc2=cc[:,1:,0].reshape(b,r,l).sum(2)
-    cc=cc[:,1:,1:].reshape(b,r,l,r,l).transpose(0,1,3,2,4).reshape(b,r*r,l,l)
+    s2dc1=cc[:,0,1:].reshape(b,NR,NT).sum(2)
+    s2dc2=cc[:,1:,0].reshape(b,NR,NT).sum(2)
+    cc=cc[:,1:,1:].reshape(b,NR,NT,NR,NT).transpose(0,1,3,2,4).reshape(b,NR*NR,NT,NT)
     s2roll=[]
-    for l_ in range(l):
+    for l_ in range(NT):
         s2roll.append(np.roll(cc[:,:,l_,:],-l_,axis=2))
     s2roll=np.stack(s2roll).sum(0).reshape(b,-1)
     rwst=np.concatenate([s2dcdc,s2dc1,s2dc2,s2roll],axis=1)
